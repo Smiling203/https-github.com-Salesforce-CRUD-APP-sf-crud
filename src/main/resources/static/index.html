@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Salesforce CRUD - CloudVandana Assignment</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  body { padding: 24px; background:#f7f8fa; }
+  #recordsTable td, #recordsTable th { vertical-align: middle; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h3 class="mb-4">Salesforce CRUD App</h3>
+
+  <button id="loginBtn" class="btn btn-primary mb-3">Login to Salesforce</button>
+  <span id="loginStatus" class="ms-2"></span>
+
+  <div id="appArea" class="d-none">
+    <div class="row mb-3">
+      <div class="col-md-4">
+        <select id="objectSelect" class="form-select">
+          <option value="">-- Select an Object --</option>
+          <option value="Account">Account</option>
+          <option value="Opportunity">Opportunity</option>
+          <option value="Lead">Lead</option>
+          <option value="Contact">Contact</option>
+          <option value="Case">Case</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <button id="newRecordBtn" class="btn btn-success" disabled>+ New Record</button>
+      </div>
+    </div>
+
+    <div style="max-height:70vh; overflow-y:auto;" id="tableWrapper">
+      <table class="table table-bordered table-hover bg-white" id="recordsTable">
+        <thead class="table-light"><tr id="tableHeadRow"></tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+      <div id="loadingRow" class="text-center text-muted d-none">Loading more...</div>
+    </div>
+  </div>
+</div>
+
+<!-- Create/Edit Modal -->
+<div class="modal fade" id="recordModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="modalTitle">New Record</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="modalFormBody"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary" id="saveRecordBtn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+
+let currentObject = null;
+let currentFields = [];
+let offset = 0;
+const PAGE_SIZE = 20;
+let isLoading = false;
+let hasMore = true;
+let editingRecordId = null; // null => create mode
+
+const recordModal = new bootstrap.Modal(document.getElementById('recordModal'));
+
+
+// Login
+document.getElementById('loginBtn').onclick = () => window.location.href = '/oauth/login';
+
+async function checkLoginStatus() {
+  const res = await fetch('/oauth/status');
+  const data = await res.json();
+  if (data.loggedIn) {
+    document.getElementById('loginStatus').textContent = '✅ Logged in';
+    document.getElementById('appArea').classList.remove('d-none');
+    document.getElementById('loginBtn').classList.add('d-none');
+  }
+}
+checkLoginStatus();
+
+
+// load fields and first page of records
+document.getElementById('objectSelect').onchange = async (e) => {
+  currentObject = e.target.value;
+  offset = 0;
+  hasMore = true;
+  document.getElementById('tableBody').innerHTML = '';
+  document.getElementById('newRecordBtn').disabled = !currentObject;
+  if (!currentObject) return;
+
+  const fieldsRes = await fetch(`/api/${currentObject}/fields`);
+  currentFields = await fieldsRes.json();
+
+  const headRow = document.getElementById('tableHeadRow');
+  headRow.innerHTML = currentFields.map(f => `<th>${f}</th>`).join('') + '<th>Actions</th>';
+
+  await loadNextPage();
+};
+
+
+async function loadNextPage() {  // Pagination: load 20 at a time, triggered on scroll-end
+
+  if (isLoading || !hasMore || !currentObject) return;
+  isLoading = true;
+  document.getElementById('loadingRow').classList.remove('d-none');
+
+  const res = await fetch(`/api/${currentObject}?limit=${PAGE_SIZE}&offset=${offset}`);
+  if (!res.ok) {
+    alert(`Could not load ${currentObject}: ${await responseError(res)}`);
+    isLoading = false;
+    document.getElementById('loadingRow').classList.add('d-none');
+    return;
+  }
+  const data = await res.json();
+  const records = data.records || [];
+
+  const tbody = document.getElementById('tableBody');
+  records.forEach(rec => {
+    const tr = document.createElement('tr');
+    currentFields.forEach(f => {
+      const td = document.createElement('td');
+      td.textContent = rec[f] ?? '';
+      tr.appendChild(td);
+    });
+    const actions = document.createElement('td');
+    const editButton = document.createElement('button');
+    editButton.className = 'btn btn-sm btn-outline-primary me-1';
+    editButton.textContent = 'Edit';
+    editButton.addEventListener('click', () => openEdit(rec));
+    const deleteButton = document.createElement('button');
+    deleteButton.className = 'btn btn-sm btn-outline-danger';
+    deleteButton.textContent = 'Delete';
+    deleteButton.addEventListener('click', () => deleteRecord(rec.Id));
+    actions.append(editButton, deleteButton);
+    tr.appendChild(actions);
+    tbody.appendChild(tr);
+  });
+
+  offset += PAGE_SIZE;
+  hasMore = records.length === PAGE_SIZE; // fewer than 20 back => no more pages
+  isLoading = false;
+  document.getElementById('loadingRow').classList.add('d-none');
+}
+
+// when user scrolls near bottom of the table wrapper, fetch next page
+document.getElementById('tableWrapper').addEventListener('scroll', function () {
+  const el = this;
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 50) {
+    loadNextPage();
+  }
+});
+
+
+// Create or Edit
+document.getElementById('newRecordBtn').onclick = () => openCreate();
+
+function openCreate() {
+  editingRecordId = null;
+  document.getElementById('modalTitle').textContent = `New ${currentObject}`;
+  renderForm({});
+  recordModal.show();
+}
+
+function openEdit(record) {
+  editingRecordId = record.Id;
+  document.getElementById('modalTitle').textContent = `Edit ${currentObject}`;
+  renderForm(record);
+  recordModal.show();
+}
+
+function renderForm(record) {
+  const body = document.getElementById('modalFormBody');
+  body.innerHTML = currentFields
+    .filter(f => f !== 'Id') // Id is system-generated, not editable
+    .map(f => `
+      <div class="mb-2">
+        <label class="form-label">${f}</label>
+        <input class="form-control" id="field_${f}" value="${record[f] ?? ''}">
+      </div>`).join('');
+}
+
+document.getElementById('saveRecordBtn').onclick = async () => {
+  const payload = {};
+  currentFields.filter(f => f !== 'Id').forEach(f => {
+    const val = document.getElementById(`field_${f}`).value;
+    if (val !== '') payload[f] = val;
+  });
+
+  let response;
+  if (editingRecordId) {
+    response = await fetch(`/api/${currentObject}/${editingRecordId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } else {
+    response = await fetch(`/api/${currentObject}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  }
+
+  if (!response.ok) {
+    alert(`Could not save ${currentObject}: ${await responseError(response)}`);
+    return;
+  }
+
+  recordModal.hide();
+  // refresh table from scratch
+  offset = 0; hasMore = true;
+  document.getElementById('tableBody').innerHTML = '';
+  await loadNextPage();
+};
+
+// DELETE
+
+async function deleteRecord(id) {
+  if (!confirm('Delete this record?')) return;
+  const response = await fetch(`/api/${currentObject}/${id}`, { method: 'DELETE' });
+  if (!response.ok) {
+    alert(`Could not delete ${currentObject}: ${await responseError(response)}`);
+    return;
+  }
+  offset = 0; hasMore = true;
+  document.getElementById('tableBody').innerHTML = '';
+  await loadNextPage();
+}
+
+async function responseError(response) {
+  const text = await response.text();
+  try {
+    const error = JSON.parse(text);
+    if (Array.isArray(error)) return error.map(item => item.message || JSON.stringify(item)).join('; ');
+    return error.message || error.error || text;
+  } catch {
+    return text || `${response.status} ${response.statusText}`;
+  }
+}
+</script>
+</body>
+</html>
